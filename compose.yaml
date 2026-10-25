@@ -1,0 +1,77 @@
+name: streamops-fr
+x-app-env: &app-env
+  ADMIN_TOKEN: ${ADMIN_TOKEN:?Exécutez scripts/bootstrap.ps1 ou scripts/bootstrap.sh}
+  READ_TOKEN: ${READ_TOKEN:?Définissez READ_TOKEN}
+  METRICS_TOKEN: ${METRICS_TOKEN:?Définissez METRICS_TOKEN}
+  HTTP_ADDR: :8080
+  DB_TIMEOUT: 5s
+  DB_POOL_MAX: ${DB_POOL_MAX:-10}
+  RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
+  RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
+  CORS_ORIGIN: ${CORS_ORIGIN:-}
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: streamops
+      POSTGRES_USER: streamops_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Définissez POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Définissez APP_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/010-app-role.sh:/docker-entrypoint-initdb.d/010-app-role.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U streamops_owner -d streamops']
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  migrate:
+    build: .
+    image: streamops-fr:local
+    command: [migrate]
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://streamops_owner:${POSTGRES_PASSWORD}@db:5432/streamops?sslmode=disable
+    depends_on:
+      db: {condition: service_healthy}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  api:
+    build: .
+    image: streamops-fr:local
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://streamops_app:${APP_DB_PASSWORD}@db:5432/streamops?sslmode=disable
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+    ports: ["127.0.0.1:${HTTP_PORT:-8080}:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 25s
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [monitoring]
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    secrets: [metrics_token]
+    depends_on: [api]
+    restart: unless-stopped
+  otel-collector:
+    image: otel/opentelemetry-collector:0.138.0
+    profiles: [monitoring]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    restart: unless-stopped
+volumes:
+  pgdata:
+  prometheus:
+secrets:
+  metrics_token:
+    file: ./.secrets/metrics_token

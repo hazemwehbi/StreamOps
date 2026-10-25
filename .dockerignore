@@ -1,0 +1,8 @@
+.git
+.env
+.secrets
+.tools
+bin
+dist
+coverage*
+*.log
